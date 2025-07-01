@@ -3,10 +3,16 @@ import struct
 
 FRAME_HEAD = 0x3E
 
+OFF = -1
 LOW = 0
 MEDIUM = 1
 HIGH = 2
-DEBUG_LEVEL = HIGH
+DEBUG_LEVEL = MEDIUM
+
+GEAR_RATIO = 36
+
+def debug_print(*args, level=0):
+    if DEBUG_LEVEL >= level: print(*args)
 
 class K_Tech_RS485:
     def __init__(self, port, baudrate=115200, timeout=0.1):
@@ -25,33 +31,33 @@ class K_Tech_RS485:
 
     def send_command(self, cmd, motor_id, data=b'', expect_len=64):
         frame = self._build_frame(cmd, motor_id, data)
-        if DEBUG_LEVEL >= HIGH: print("TX:", ' '.join(f'{byte:02X}' for byte in frame))
+        debug_print("TX:", ' '.join(f'{byte:02X}' for byte in frame), level=HIGH)
         self.serial.write(frame)
 
         if expect_len == -1: # echo expected
             response = self.serial.read(len(frame))
-            if DEBUG_LEVEL >= HIGH: print("RX:", ' '.join(f'{byte:02X}' for byte in response))
+            debug_print("RX:", ' '.join(f'{byte:02X}' for byte in response), level=HIGH)
             if response == frame:
                 return True
             else:
-                print("Comm. error")
+                debug_print("Comm. error", level=LOW)
                 return False
         elif expect_len == -2:
             raw = self.serial.read(13)
-            if DEBUG_LEVEL >= HIGH: print("RX:", ' '.join(f'{byte:02X}' for byte in raw))
+            debug_print("RX:", ' '.join(f'{byte:02X}' for byte in raw), level=HIGH)
             if len(raw) < 13:
-                print("No response or too short.")
+                debug_print("No response or too short.", level=LOW)
                 return False
             temp = struct.unpack('b', raw[5:6])[0]
             torque = struct.unpack('<h', raw[6:8])[0]  # signed int16
             speed = struct.unpack('<h', raw[8:10])[0]
             encoder = struct.unpack('<H', raw[10:12])[0]
-            if DEBUG_LEVEL >= MEDIUM: print(f"[State2] Temp: {temp}°C, Torque/Power: {torque}, Speed: {speed} dps, Encoder: {encoder}")
+            debug_print(f"[State2] Temp: {temp}°C, Torque/Power: {torque}, Speed: {speed} dps, Encoder: {encoder}", level=MEDIUM)
             return True
 
         else: # data expected                   
             data = self.serial.read(expect_len)
-            if DEBUG_LEVEL >= HIGH: print("RX:", ' '.join(f'{byte:02X}' for byte in data))
+            debug_print("RX:", ' '.join(f'{byte:02X}' for byte in data), level=HIGH)
             return data
 
     def close(self):
@@ -62,13 +68,13 @@ class K_Tech_RS485:
     def read_state1(self, motor_id):
         raw = self.send_command(0x9A, motor_id, expect_len=13)
         if len(raw) < 13:
-            print("No response or too short.")
+            debug_print("No response or too short.", level=LOW)
             return
         temp = struct.unpack('b', raw[5:6])[0]
         voltage = struct.unpack('<H', raw[6:8])[0] * 0.01
         state = raw[10]
         error = raw[11]
-        if DEBUG_LEVEL >= MEDIUM: print(f"[State1] Temp: {temp}°C, Voltage: {voltage:.2f}V, Motor {'ON' if state==0x00 else 'OFF'}, ErrorState: 0x{error:02X}")
+        debug_print(f"[State1] Temp: {temp}°C, Voltage: {voltage:.2f}V, Motor {'ON' if state==0x00 else 'OFF'}, ErrorState: 0x{error:02X}", level=MEDIUM)
 
     def clear_error(self, motor_id):
         self.send_command(0x9B, motor_id, expect_len=5)
@@ -88,7 +94,7 @@ class K_Tech_RS485:
     def read_state3(self, motor_id):
         raw = self.send_command(0x9D, motor_id, expect_len=13)
         if len(raw) < 13:
-            print("No response or too short.")
+            debug_print("No response or too short.", level=LOW)
             return
 
         # The motor returns 5 command bytes + 7 data bytes + checksum
@@ -97,15 +103,15 @@ class K_Tech_RS485:
         iB = struct.unpack('<h', raw[8:10])[0] / 64.0
         iC = struct.unpack('<h', raw[10:12])[0] / 64.0
 
-        if DEBUG_LEVEL >= MEDIUM: print(f"[State3] Temp: {temp}°C | Phase Currents: A={iA:.2f}A, B={iB:.2f}A, C={iC:.2f}A")
+        debug_print(f"[State3] Temp: {temp}°C | Phase Currents: A={iA:.2f}A, B={iB:.2f}A, C={iC:.2f}A", level=MEDIUM)
 
     def motor_off(self, motor_id):
         self.send_command(0x80, motor_id, expect_len=-1)
-        if DEBUG_LEVEL >= MEDIUM: print("Motor ", motor_id, " OFF")
+        debug_print("Motor ", motor_id, " OFF", level=MEDIUM)
 
     def motor_on(self, motor_id):
         self.send_command(0x88, motor_id, expect_len=-1)
-        if DEBUG_LEVEL >= MEDIUM: print("Motor ", motor_id, " ON")
+        debug_print("Motor ", motor_id, " ON", level=MEDIUM)
 
     def motor_stop(self, motor_id):
         self.send_command(0x81, motor_id, expect_len=-1)
@@ -131,7 +137,7 @@ class K_Tech_RS485:
             response = self.send_command(0x8C, motor_id, data, 7)
             brake_byte = response[5]
             status = "released" if brake_byte == 0x01 else "engaged"
-            if DEBUG_LEVEL >= MEDIUM: print(f"[Brake Status] Holding brake is {status}.")
+            debug_print(f"[Brake Status] Holding brake is {status}.", level=MEDIUM)
         else:
             raise ValueError("Invalid mode. Use 0 (lock), 1 (release), 2 (query).")
 
@@ -145,9 +151,9 @@ class K_Tech_RS485:
 
         data = struct.pack('<h', iq_control)  # 2-byte signed little endian
         self.send_command(0xA1, motor_id, data, expected_len=-2)
-        if DEBUG_LEVEL >= MEDIUM: print(f"[Torque] Sent iqControl = {iq_control}")
+        debug_print(f"[Torque] Sent iqControl = {iq_control}", level=MEDIUM)
 
-    def speed_control(self, motor_id, speed_dps):
+    def speed_control(self, motor_id, speed_dps, gear_ratio):
         """
         Sends speed control command.
         :param iq_control: int32_t, 0.01 dps/LSB
@@ -161,35 +167,35 @@ class K_Tech_RS485:
         if not isinstance(speed_dps, (int, float)):
             raise ValueError("speed_dps must be a number")
         
-        speed_val = int(speed_dps * 100)  # 0.01 dps/LSB
+        speed_val = int(speed_dps * 100 * gear_ratio)  # 0.01 dps/LSB
         data = struct.pack('<i', speed_val)
         self.send_command(0xA2, motor_id, data, expect_len=-2)
-        if DEBUG_LEVEL >= MEDIUM: print(f"[Speed] Sent speed = {speed_dps:.2f}°/s ({speed_val} LSB)")
+        debug_print(f"[Speed] Sent speed = {speed_dps:.2f}°/s ({speed_val} LSB)", level=MEDIUM)
 
-    def multi_loop_angle1(self, motor_id, angle_deg):
+    def multi_loop_angle1(self, motor_id, angle_deg, gear_ratio):
         """
         Moves motor to absolute multi-turn angle.
         :param angle_deg: float, in degrees (360.00 = one turn)
         """
-        angle_val = int(angle_deg * 100)  # 0.01 deg/LSB
+        angle_val = int(angle_deg * 100 * gear_ratio)  # 0.01 deg/LSB
         data = struct.pack('<q', angle_val)  # 8 bytes int64
         self.send_command(0xA3, motor_id, data, expect_len=-2)
-        if DEBUG_LEVEL >= MEDIUM: print(f"[Multi-loop 1] Moving to {angle_deg:.2f}°")
+        debug_print(f"[Multi-loop 1] Moving to {angle_deg:.2f}°", level=MEDIUM)
 
-    def multi_loop_angle2(self, motor_id, angle_deg, max_speed_dps):
+    def multi_loop_angle2(self, motor_id, angle_deg, max_speed_dps, gear_ratio):
         """
         Moves to absolute multi-turn angle with speed limit.
         :param angle_deg: float
         :param max_speed_dps: float, max speed in deg/s
         """
-        angle_val = int(angle_deg * 100)
-        speed_val = int(max_speed_dps * 100)
+        angle_val = int(angle_deg * 100 * gear_ratio)
+        speed_val = int(max_speed_dps * 100 * gear_ratio)
 
         data = struct.pack('<qI', angle_val, speed_val)
         self.send_command(0xA4, motor_id, data, expect_len=-2)
-        if DEBUG_LEVEL >= MEDIUM: print(f"[Multi-loop 2] {angle_deg:.2f}° @ ≤ {max_speed_dps:.2f}°/s")
+        debug_print(f"[Multi-loop 2] {angle_deg:.2f}° @ ≤ {max_speed_dps:.2f}°/s", level=MEDIUM)
 
-    def single_loop_angle1(self, motor_id, angle_deg, direction):
+    def single_loop_angle1(self, motor_id, angle_deg, direction, gear_ratio):
         """
         Moves motor within 0–360° in one loop.
         :param angle_deg: float [0–359.99]
@@ -200,12 +206,12 @@ class K_Tech_RS485:
         if direction not in (0, 1):
             raise ValueError("direction must be 0 (CW) or 1 (CCW)")
 
-        angle_val = int(angle_deg * 100)
+        angle_val = int(angle_deg * 100 * gear_ratio)
         data = bytes([direction]) + struct.pack('<H', angle_val) + b'\x00'
         self.send_command(0xA5, motor_id, data, expect_len=-2)
-        if DEBUG_LEVEL >= MEDIUM: print(f"[Single-loop 1] {angle_deg:.2f}° {'CW' if direction == 0 else 'CCW'}")
+        debug_print(f"[Single-loop 1] {angle_deg:.2f}° {'CW' if direction == 0 else 'CCW'}", level=MEDIUM)
 
-    def single_loop_angle2(self, motor_id, angle_deg, direction, max_speed_dps):
+    def single_loop_angle2(self, motor_id, angle_deg, direction, max_speed_dps, gear_ratio):
         """
         Moves within one loop to specified angle at limited speed.
         :param angle_deg: float [0–359.99]
@@ -213,49 +219,49 @@ class K_Tech_RS485:
         :param max_speed_dps: float
         """
         if not (0 <= angle_deg < 360):
-            raise ValueError("angle_deg must be in [0, 360)")
+            raise ValueError("angle_deg must be in [0, 360]")
         if direction not in (0, 1):
             raise ValueError("direction must be 0 (CW) or 1 (CCW)")
 
-        angle_val = int(angle_deg * 100)
-        speed_val = int(max_speed_dps * 100)
+        angle_val = int(angle_deg * 100 * gear_ratio)
+        speed_val = int(max_speed_dps * 100 * gear_ratio)
 
         data = bytes([direction]) + struct.pack('<H', angle_val) + b'\x00' + struct.pack('<I', speed_val)
         self.send_command(0xA6, motor_id, data, expect_len=-2)
-        if DEBUG_LEVEL >= MEDIUM: print(f"[Single-loop 2] {angle_deg:.2f}° {'CW' if direction == 0 else 'CCW'} @ ≤ {max_speed_dps:.2f}°/s")
+        debug_print(f"[Single-loop 2] {angle_deg:.2f}° {'CW' if direction == 0 else 'CCW'} @ ≤ {max_speed_dps:.2f}°/s", level=MEDIUM)
 
-    def increment_angle1(self, motor_id, delta_deg):
-        """
-        Moves motor by a relative angle.
-        :param delta_deg: float, delta in degrees (positive = CW, negative = CCW)
-        """
-        delta_val = int(delta_deg * 100)  # 0.01 deg/LSB
-        data = struct.pack('<i', delta_val)  # int32
-        self.send_command(0xA7, motor_id, data, expect_len=-2)
-        if DEBUG_LEVEL >= MEDIUM: print(f"[Increment 1] Moving by {delta_deg:.2f}°")
+    # def increment_angle1(self, motor_id, delta_deg):
+    #     """
+    #     Moves motor by a relative angle.
+    #     :param delta_deg: float, delta in degrees (positive = CW, negative = CCW)
+    #     """
+    #     delta_val = int(delta_deg * 100)  # 0.01 deg/LSB
+    #     data = struct.pack('<i', delta_val)  # int32
+    #     self.send_command(0xA7, motor_id, data, expect_len=-2)
+    #     debug_print(f"[Increment 1] Moving by {delta_deg:.2f}°", level=MEDIUM)
 
-    def increment_angle2(self, motor_id, delta_deg, max_speed_dps):
-        """
-        Moves motor by a relative angle with speed limit.
-        :param delta_deg: float
-        :param max_speed_dps: float
-        """
-        delta_val = int(delta_deg * 100)
-        speed_val = int(max_speed_dps * 100)
+    # def increment_angle2(self, motor_id, delta_deg, max_speed_dps):
+    #     """
+    #     Moves motor by a relative angle with speed limit.
+    #     :param delta_deg: float
+    #     :param max_speed_dps: float
+    #     """
+    #     delta_val = int(delta_deg * 100)
+    #     speed_val = int(max_speed_dps * 100)
 
-        data = struct.pack('<iI', delta_val, speed_val)  # int32 delta, uint32 speed
-        self.send_command(0xA8, motor_id, data, expect_len=-2)
-        if DEBUG_LEVEL >= MEDIUM: print(f"[Increment 2] Δ = {delta_deg:.2f}°, max speed = {max_speed_dps:.2f}°/s")
+    #     data = struct.pack('<iI', delta_val, speed_val)  # int32 delta, uint32 speed
+    #     self.send_command(0xA8, motor_id, data, expect_len=-2)
+    #     debug_print(f"[Increment 2] Δ = {delta_deg:.2f}°, max speed = {max_speed_dps:.2f}°/s", level=MEDIUM)
 
     def read_encoder(self, motor_id):
         raw = self.send_command(0x90, motor_id, expect_len=12)
         if len(raw) < 12:
-            print("[Encoder] No response.")
+            debug_print("[Encoder] No response.", level=LOW)
             return
         encoder = struct.unpack('<H', raw[5:7])[0]
         raw_val = struct.unpack('<H', raw[7:9])[0]
         offset = struct.unpack('<H', raw[9:11])[0]
-        if DEBUG_LEVEL >= MEDIUM: print(f"[Encoder] Value: {encoder}, Raw: {raw_val}, Offset: {offset}")
+        debug_print(f"[Encoder] Value: {encoder}, Raw: {raw_val}, Offset: {offset}", level=MEDIUM)
         return encoder, raw_val, offset
 
     def set_zero_rom(self, motor_id): 
@@ -264,33 +270,33 @@ class K_Tech_RS485:
         the chip life, and frequent use is not recommended.
         """
         self.send_command(0x19, motor_id, expect_len=8)
-        if DEBUG_LEVEL >= MEDIUM: print("[Set Zero ROM] Sent. (Flashes ROM!)")
+        debug_print("[Set Zero ROM] Sent. (Flashes ROM!)", level=MEDIUM)
 
-    def read_multi_loop_angle(self, motor_id):
-        raw = self.send_command(0x92, motor_id, expect_len=15)
-        if len(raw) < 13:
-            print("[Multi-loop Angle] No response.")
+    def read_multi_loop_angle(self, motor_id, gear_ratio):
+        raw = self.send_command(0x92, motor_id, expect_len=14)
+        if len(raw) < 14:
+            debug_print("[Multi-loop Angle] No response.", level=LOW)
             return
-        angle = struct.unpack('<q', raw[5:13])[0] * 0.01
-        if DEBUG_LEVEL >= MEDIUM: print(f"[Multi-loop Angle] {angle:.2f}°")
+        angle = struct.unpack('<q', raw[5:13])[0] * 0.01 / gear_ratio
+        debug_print(f"[Multi-loop Angle] {angle:.2f}°", level=MEDIUM)
         return angle
 
     def clear_multi_loop_angle(self, motor_id):
         self.send_command(0x93, motor_id, expect_len=-1)
-        if DEBUG_LEVEL >= MEDIUM: print("[Multi-loop Angle] Cleared.")
+        debug_print("[Multi-loop Angle] Cleared.", level=MEDIUM)
 
-    def read_single_loop_angle(self, motor_id):
+    def read_single_loop_angle(self, motor_id, gear_ratio):
         raw = self.send_command(0x94, motor_id, expect_len=10)
-        if len(raw) < 9:
-            print("[Single-loop Angle] No response.")
+        if len(raw) < 10:
+            debug_print("[Single-loop Angle] No response.", level=LOW)
             return
-        angle = struct.unpack('<I', raw[5:9])[0] * 0.01
-        if DEBUG_LEVEL >= MEDIUM: print(f"[Single-loop Angle] {angle:.2f}°")
+        angle = struct.unpack('<I', raw[5:9])[0] * 0.01 / gear_ratio
+        debug_print(f"[Single-loop Angle] {angle:.2f}°", level=MEDIUM)
         return angle
 
     def set_zero_ram(self, motor_id):
         self.send_command(0x95, motor_id, expect_len=-1)
-        if DEBUG_LEVEL >= MEDIUM: print("[Set Zero RAM] Position set as zero (volatile).")
+        debug_print("[Set Zero RAM] Position set as zero (volatile).", level=MEDIUM)
 
 # Not finished
     # def read_pid(self, motor_id, param_id):
@@ -318,7 +324,7 @@ class K_Tech_RS485:
     def read_driver_info(self, motor_id):
         raw = self.send_command(0x12, motor_id, expect_len=64)
         if len(raw) < 64:
-            print("[Driver Info] No response.")
+            debug_print("[Driver Info] No response.", level=LOW)
             return
 
         driver = raw[5:25].decode('ascii', errors='ignore').strip('\x00')
@@ -328,8 +334,8 @@ class K_Tech_RS485:
         motor_ver = struct.unpack('<H', raw[59:61])[0] / 10.0
         fw_ver = struct.unpack('<H', raw[61:63])[0] / 10.0
 
-        if DEBUG_LEVEL >= MEDIUM: print(f"[Driver Info]\n- Driver: {driver}\n- Motor: {motor}\n- SN: {serial}")
-        if DEBUG_LEVEL >= MEDIUM: print(f"- HW Ver: {hw_ver:.1f}, Motor Ver: {motor_ver:.1f}, FW Ver: {fw_ver:.1f}")
+        debug_print(f"[Driver Info]\n- Driver: {driver}\n- Motor: {motor}\n- SN: {serial}", level=MEDIUM)
+        debug_print(f"- HW Ver: {hw_ver:.1f}, Motor Ver: {motor_ver:.1f}, FW Ver: {fw_ver:.1f}", level=MEDIUM)
 
 
 if __name__=="__main__":
@@ -339,22 +345,39 @@ if __name__=="__main__":
     motor = K_Tech_RS485('/dev/ttyUSB1')  # or COMx on Windows
     motor_id = 1
 
-    # print("Turning on motor...")
+    motor.read_driver_info(motor_id)
+
     motor.motor_on(motor_id)
-    # motor.speed_control(motor_id, 100.0)
-    # time.sleep(5)
-    motor.read_encoder(motor_id)
-    # motor.read_driver_info(motor_id)
 
-    # motor.read_state1(motor_id)
-    # motor.read_state2(motor_id)
-    # motor.read_state3(motor_id)
-    # motor.motor_brake(motor_id, 1)
-    # motor.read_encoder(motor_id)
-    # motor.read_single_loop_angle(motor_id)
-    # motor.read_multi_loop_angle(motor_id)
+    angle = motor.read_multi_loop_angle(motor_id, GEAR_RATIO)
+    time.sleep(0.5)
 
-    # print("Done.")
+    motor.multi_loop_angle2(motor_id, angle, 200, GEAR_RATIO)
+
+
+    for i in range(3):
+
+        motor.multi_loop_angle2(motor_id, angle+360, 360, GEAR_RATIO)
+
+        time.sleep(2)
+
+        motor.multi_loop_angle2(motor_id, angle, 360, GEAR_RATIO)
+
+        time.sleep(2)
+
+
+        # motor.read_driver_info(motor_id)
+
+        # motor.read_state1(motor_id)
+        # motor.read_state2(motor_id)
+        # motor.read_state3(motor_id)
+        # motor.motor_brake(motor_id, 1)
+        # motor.read_encoder(motor_id)
+        # motor.read_single_loop_angle(motor_id)
+        # motor.read_multi_loop_angle(motor_id)
+
+        # print("Done.")
     motor.motor_stop(motor_id)
     motor.motor_off(motor_id)
+        
     motor.close()
