@@ -1,3 +1,11 @@
+# -----------------------------------------------------------
+# Project : LK Motors Control
+# Author  : Axel Praplan
+# Purpose : Script for controlling and processing data related
+#           to LK motors (e.g., extracting motor index, etc.)
+# Date    : 2025-07-02
+# -----------------------------------------------------------
+
 import serial
 import struct
 
@@ -9,7 +17,9 @@ MEDIUM = 1
 HIGH = 2
 DEBUG_LEVEL = MEDIUM
 
-GEAR_RATIO = 36
+# To do: handle wrong echo
+# To do: handle pid reading and setting
+
 
 def debug_print(*args, level=0):
     if DEBUG_LEVEL >= level: print(*args)
@@ -17,6 +27,8 @@ def debug_print(*args, level=0):
 class K_Tech_RS485:
     def __init__(self, port, baudrate=115200, timeout=0.1):
         self.serial = serial.Serial(port, baudrate, timeout=timeout)
+
+        self.gear_ratios = [0.0] * 65 # Store gear ratios on init
 
     def _checksum(self, data):
         return sum(data) & 0xFF
@@ -58,6 +70,18 @@ class K_Tech_RS485:
         else: # data expected                   
             data = self.serial.read(expect_len)
             debug_print("RX:", ' '.join(f'{byte:02X}' for byte in data), level=HIGH)
+
+            i = 1
+            while len(data) != expect_len and i <= 5:
+                debug_print("TX repeat ", i, level=LOW)
+                debug_print("TX:", ' '.join(f'{byte:02X}' for byte in frame), level=HIGH)
+                self.serial.write(frame)
+
+                data = self.serial.read(expect_len)
+                debug_print("RX:", ' '.join(f'{byte:02X}' for byte in data), level=HIGH)
+
+                i += 1
+
             return data
 
     def close(self):
@@ -107,11 +131,41 @@ class K_Tech_RS485:
 
     def motor_off(self, motor_id):
         self.send_command(0x80, motor_id, expect_len=-1)
-        debug_print("Motor ", motor_id, " OFF", level=MEDIUM)
+        debug_print("[Driver Info] Motor ", motor_id, " OFF", level=MEDIUM)
 
     def motor_on(self, motor_id):
         self.send_command(0x88, motor_id, expect_len=-1)
-        debug_print("Motor ", motor_id, " ON", level=MEDIUM)
+        debug_print("[Driver Info] Motor ", motor_id, " ON", level=MEDIUM)
+
+        # Extract gear ratio
+        raw = self.send_command(0x12, motor_id, expect_len=64)
+        if len(raw) < 64:
+            debug_print("[Driver Info] No response.", level=LOW)
+            return
+
+        driver = raw[5:25].decode('ascii', errors='ignore').strip('\x00')
+        motor = raw[25:45].decode('ascii', errors='ignore').strip('\x00')
+        serial = raw[45:57].decode('ascii', errors='ignore').strip('\x00')
+        hw_ver = struct.unpack('<H', raw[57:59])[0] / 10.0
+        motor_ver = struct.unpack('<H', raw[59:61])[0] / 10.0
+        fw_ver = struct.unpack('<H', raw[61:63])[0] / 10.0
+
+        debug_print(f"[Driver Info]\n- Driver: {driver}\n- Motor: {motor}\n- SN: {serial}", level=MEDIUM)
+        debug_print(f"- HW Ver: {hw_ver:.1f}, Motor Ver: {motor_ver:.1f}, FW Ver: {fw_ver:.1f}", level=MEDIUM)
+
+        index = motor.find('-i')
+        if index != -1:
+            gr = ''
+            i = index + 2  # start just after '-i'
+            while i < len(motor) and motor[i].isdigit():
+                gr += motor[i]
+                i += 1
+            gr = float(gr)
+        else: raise ValueError("Impossible to extract the motor gear ratio.")
+
+        debug_print(f"- Gear Ratio: {gr}", level=MEDIUM)
+
+        self.gear_ratios[motor_id] = gr
 
     def motor_stop(self, motor_id):
         self.send_command(0x81, motor_id, expect_len=-1)
@@ -153,7 +207,7 @@ class K_Tech_RS485:
         self.send_command(0xA1, motor_id, data, expected_len=-2)
         debug_print(f"[Torque] Sent iqControl = {iq_control}", level=MEDIUM)
 
-    def speed_control(self, motor_id, speed_dps, gear_ratio):
+    def speed_control(self, motor_id, speed_dps):
         """
         Sends speed control command.
         :param iq_control: int32_t, 0.01 dps/LSB
@@ -167,35 +221,35 @@ class K_Tech_RS485:
         if not isinstance(speed_dps, (int, float)):
             raise ValueError("speed_dps must be a number")
         
-        speed_val = int(speed_dps * 100 * gear_ratio)  # 0.01 dps/LSB
+        speed_val = int(speed_dps * 100 * self.gear_ratios[motor_id])  # 0.01 dps/LSB
         data = struct.pack('<i', speed_val)
         self.send_command(0xA2, motor_id, data, expect_len=-2)
         debug_print(f"[Speed] Sent speed = {speed_dps:.2f}°/s ({speed_val} LSB)", level=MEDIUM)
 
-    def multi_loop_angle1(self, motor_id, angle_deg, gear_ratio):
+    def multi_loop_angle1(self, motor_id, angle_deg):
         """
         Moves motor to absolute multi-turn angle.
         :param angle_deg: float, in degrees (360.00 = one turn)
         """
-        angle_val = int(angle_deg * 100 * gear_ratio)  # 0.01 deg/LSB
+        angle_val = int(angle_deg * 100 * self.gear_ratios[motor_id])  # 0.01 deg/LSB
         data = struct.pack('<q', angle_val)  # 8 bytes int64
         self.send_command(0xA3, motor_id, data, expect_len=-2)
         debug_print(f"[Multi-loop 1] Moving to {angle_deg:.2f}°", level=MEDIUM)
 
-    def multi_loop_angle2(self, motor_id, angle_deg, max_speed_dps, gear_ratio):
+    def multi_loop_angle2(self, motor_id, angle_deg, max_speed_dps):
         """
         Moves to absolute multi-turn angle with speed limit.
         :param angle_deg: float
         :param max_speed_dps: float, max speed in deg/s
         """
-        angle_val = int(angle_deg * 100 * gear_ratio)
-        speed_val = int(max_speed_dps * 100 * gear_ratio)
+        angle_val = int(angle_deg * 100 * self.gear_ratios[motor_id])
+        speed_val = int(max_speed_dps * 100 * self.gear_ratios[motor_id])
 
         data = struct.pack('<qI', angle_val, speed_val)
         self.send_command(0xA4, motor_id, data, expect_len=-2)
         debug_print(f"[Multi-loop 2] {angle_deg:.2f}° @ ≤ {max_speed_dps:.2f}°/s", level=MEDIUM)
 
-    def single_loop_angle1(self, motor_id, angle_deg, direction, gear_ratio):
+    def single_loop_angle1(self, motor_id, angle_deg, direction):
         """
         Moves motor within 0–360° in one loop.
         :param angle_deg: float [0–359.99]
@@ -206,12 +260,12 @@ class K_Tech_RS485:
         if direction not in (0, 1):
             raise ValueError("direction must be 0 (CW) or 1 (CCW)")
 
-        angle_val = int(angle_deg * 100 * gear_ratio)
+        angle_val = int(angle_deg * 100 * self.gear_ratios[motor_id])
         data = bytes([direction]) + struct.pack('<H', angle_val) + b'\x00'
         self.send_command(0xA5, motor_id, data, expect_len=-2)
         debug_print(f"[Single-loop 1] {angle_deg:.2f}° {'CW' if direction == 0 else 'CCW'}", level=MEDIUM)
 
-    def single_loop_angle2(self, motor_id, angle_deg, direction, max_speed_dps, gear_ratio):
+    def single_loop_angle2(self, motor_id, angle_deg, direction, max_speed_dps):
         """
         Moves within one loop to specified angle at limited speed.
         :param angle_deg: float [0–359.99]
@@ -223,35 +277,35 @@ class K_Tech_RS485:
         if direction not in (0, 1):
             raise ValueError("direction must be 0 (CW) or 1 (CCW)")
 
-        angle_val = int(angle_deg * 100 * gear_ratio)
-        speed_val = int(max_speed_dps * 100 * gear_ratio)
+        angle_val = int(angle_deg * 100 * self.gear_ratios[motor_id])
+        speed_val = int(max_speed_dps * 100 * self.gear_ratios[motor_id])
 
         data = bytes([direction]) + struct.pack('<H', angle_val) + b'\x00' + struct.pack('<I', speed_val)
         self.send_command(0xA6, motor_id, data, expect_len=-2)
         debug_print(f"[Single-loop 2] {angle_deg:.2f}° {'CW' if direction == 0 else 'CCW'} @ ≤ {max_speed_dps:.2f}°/s", level=MEDIUM)
 
-    # def increment_angle1(self, motor_id, delta_deg):
-    #     """
-    #     Moves motor by a relative angle.
-    #     :param delta_deg: float, delta in degrees (positive = CW, negative = CCW)
-    #     """
-    #     delta_val = int(delta_deg * 100)  # 0.01 deg/LSB
-    #     data = struct.pack('<i', delta_val)  # int32
-    #     self.send_command(0xA7, motor_id, data, expect_len=-2)
-    #     debug_print(f"[Increment 1] Moving by {delta_deg:.2f}°", level=MEDIUM)
+    def increment_angle1(self, motor_id, delta_deg):
+        """
+        Moves motor by a relative angle.
+        :param delta_deg: float, delta in degrees (positive = CW, negative = CCW)
+        """
+        delta_val = int(delta_deg * 100 * self.gear_ratios[motor_id])  # 0.01 deg/LSB
+        data = struct.pack('<i', delta_val)  # int32
+        self.send_command(0xA7, motor_id, data, expect_len=-2)
+        debug_print(f"[Increment 1] Moving by {delta_deg:.2f}°", level=MEDIUM)
 
-    # def increment_angle2(self, motor_id, delta_deg, max_speed_dps):
-    #     """
-    #     Moves motor by a relative angle with speed limit.
-    #     :param delta_deg: float
-    #     :param max_speed_dps: float
-    #     """
-    #     delta_val = int(delta_deg * 100)
-    #     speed_val = int(max_speed_dps * 100)
+    def increment_angle2(self, motor_id, delta_deg, max_speed_dps):
+        """
+        Moves motor by a relative angle with speed limit.
+        :param delta_deg: float
+        :param max_speed_dps: float
+        """
+        delta_val = int(delta_deg * 100* self.gear_ratios[motor_id])
+        speed_val = int(max_speed_dps * 100* self.gear_ratios[motor_id])
 
-    #     data = struct.pack('<iI', delta_val, speed_val)  # int32 delta, uint32 speed
-    #     self.send_command(0xA8, motor_id, data, expect_len=-2)
-    #     debug_print(f"[Increment 2] Δ = {delta_deg:.2f}°, max speed = {max_speed_dps:.2f}°/s", level=MEDIUM)
+        data = struct.pack('<iI', delta_val, speed_val)  # int32 delta, uint32 speed
+        self.send_command(0xA8, motor_id, data, expect_len=-2)
+        debug_print(f"[Increment 2] Δ = {delta_deg:.2f}°, max speed = {max_speed_dps:.2f}°/s", level=MEDIUM)
 
     def read_encoder(self, motor_id):
         raw = self.send_command(0x90, motor_id, expect_len=12)
@@ -272,12 +326,12 @@ class K_Tech_RS485:
         self.send_command(0x19, motor_id, expect_len=8)
         debug_print("[Set Zero ROM] Sent. (Flashes ROM!)", level=MEDIUM)
 
-    def read_multi_loop_angle(self, motor_id, gear_ratio):
+    def read_multi_loop_angle(self, motor_id):
         raw = self.send_command(0x92, motor_id, expect_len=14)
         if len(raw) < 14:
             debug_print("[Multi-loop Angle] No response.", level=LOW)
             return
-        angle = struct.unpack('<q', raw[5:13])[0] * 0.01 / gear_ratio
+        angle = struct.unpack('<q', raw[5:13])[0] * 0.01 / self.gear_ratios[motor_id]
         debug_print(f"[Multi-loop Angle] {angle:.2f}°", level=MEDIUM)
         return angle
 
@@ -285,12 +339,12 @@ class K_Tech_RS485:
         self.send_command(0x93, motor_id, expect_len=-1)
         debug_print("[Multi-loop Angle] Cleared.", level=MEDIUM)
 
-    def read_single_loop_angle(self, motor_id, gear_ratio):
+    def read_single_loop_angle(self, motor_id):
         raw = self.send_command(0x94, motor_id, expect_len=10)
         if len(raw) < 10:
             debug_print("[Single-loop Angle] No response.", level=LOW)
             return
-        angle = struct.unpack('<I', raw[5:9])[0] * 0.01 / gear_ratio
+        angle = struct.unpack('<I', raw[5:9])[0] * 0.01 / self.gear_ratios[motor_id]
         debug_print(f"[Single-loop Angle] {angle:.2f}°", level=MEDIUM)
         return angle
 
@@ -342,42 +396,34 @@ if __name__=="__main__":
 
     import time
 
-    motor = K_Tech_RS485('/dev/ttyUSB1')  # or COMx on Windows
+    motor = K_Tech_RS485('/dev/ttyUSB2')  # or COMx on Windows
     motor_id = 1
-
-    motor.read_driver_info(motor_id)
 
     motor.motor_on(motor_id)
 
-    angle = motor.read_multi_loop_angle(motor_id, GEAR_RATIO)
+    angle = motor.read_multi_loop_angle(motor_id)
     time.sleep(0.5)
 
-    motor.multi_loop_angle2(motor_id, angle, 200, GEAR_RATIO)
-
+    motor.multi_loop_angle2(motor_id, angle, 200)
 
     for i in range(3):
-
-        motor.multi_loop_angle2(motor_id, angle+360, 360, GEAR_RATIO)
-
+        motor.multi_loop_angle2(motor_id, angle+360, 360)
+        time.sleep(2)
+        motor.multi_loop_angle2(motor_id, angle, 360)
         time.sleep(2)
 
-        motor.multi_loop_angle2(motor_id, angle, 360, GEAR_RATIO)
-
+    for i in range(3):
+        motor.increment_angle2(motor_id, 360, 360)
+        time.sleep(2)
+        motor.increment_angle2(motor_id, -360, 360)
         time.sleep(2)
 
-
-        # motor.read_driver_info(motor_id)
-
-        # motor.read_state1(motor_id)
-        # motor.read_state2(motor_id)
-        # motor.read_state3(motor_id)
-        # motor.motor_brake(motor_id, 1)
-        # motor.read_encoder(motor_id)
-        # motor.read_single_loop_angle(motor_id)
-        # motor.read_multi_loop_angle(motor_id)
-
-        # print("Done.")
     motor.motor_stop(motor_id)
+
+    for i in range(50):
+        motor.read_multi_loop_angle(motor_id)
+        time.sleep(0.1)
+
     motor.motor_off(motor_id)
         
     motor.close()
